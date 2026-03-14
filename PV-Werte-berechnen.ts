@@ -523,3 +523,37 @@ if (Sommer) {
     scheduleIOB('0 5 * * 0', () => setChargeLimitAllHypers(90));
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Energiefluss erweitert hängt sich manchmal auf: wir check seinen Status regelmäßig und starten ihn neu wenn nötig
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const adapterInstance = "energiefluss-erweitert.0";
+
+// Interne ioBroker Pfade
+const objPath = "system.adapter." + adapterInstance;
+const alivePath = objPath + ".alive";
+
+// Schedule: Prüft alle 5 Minuten
+schedule("*/5 * * * *", function () {
+    let isAlive = getState(alivePath).val;
+    
+    if (!isAlive) {
+        log(`Adapter ${adapterInstance} läuft nicht (alive = false). Führe Neustart durch...`, "warn");
+        restartAdapter();
+    }
+});
+
+// Funktion zum Neustarten des Adapters
+function restartAdapter() {
+    // 1. Adapter stoppen (enabled: false)
+    extendObject(objPath, {common: {enabled: false}}, function() {
+        log(`Adapter ${adapterInstance} wurde gestoppt. Warte auf Neustart...`, "info");
+        
+        // 2. 5 Sekunden warten, damit der Prozess sauber beendet wird
+        setTimeout(function() {
+            // 3. Adapter wieder starten (enabled: true)
+            extendObject(objPath, {common: {enabled: true}});
+            log(`Adapter ${adapterInstance} wurde wieder gestartet.`, "info");
+        }, 5000); 
+    });
+}

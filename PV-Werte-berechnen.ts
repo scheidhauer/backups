@@ -557,3 +557,93 @@ function restartAdapter() {
         }, 5000); 
     });
 }
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// TSC (Tesla Solar Charger) Ansteuerung
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const http = require('http');
+
+const tscIp: string = 'raspberrypi:7190'; 
+const carId: number = 1;
+const dpChargeMode: string = '0_userdata.0.TSC.AktuellerLademodus';
+
+// 1. Datenpunkt anlegen
+createState(dpChargeMode, 2, {
+    name: 'TSC Aktueller Lademodus',
+    type: 'number',
+    role: 'value',
+    read: true,
+    write: true,
+    states: { 0: 'Off', 1: 'Manual', 2: 'Auto', 3: 'Max Power' }
+});
+
+const [host, port] = tscIp.split(':');
+
+// --- TEIL 1: LESEN (Vom TSC abrufen) ---
+function updateTscStatus(): void {
+    const url = `http://${tscIp}/api/Config/GetSettings`;
+    http.get(url, (res: any) => {
+        let rawData = '';
+        res.on('data', (chunk: any) => rawData += chunk);
+        res.on('end', () => {
+            try {
+                const data = JSON.parse(rawData);
+                const car = data.cars.find((c: any) => c.id === carId);
+                if (car && car.chargeModeV2 !== undefined) {
+                    setState(dpChargeMode, car.chargeModeV2, true);
+                }
+            } catch (e) { /* Fehler beim Polling stumm ignorieren */ }
+        });
+    }).on('error', (err: any) => console.error('[TSC-Read] Fehler: ' + err.message));
+}
+
+// --- TEIL 2: SCHREIBEN (An neue TSC Home-API senden) ---
+on({id: dpChargeMode, change: 'any', ack: false}, (obj) => {
+    const newModeNum = obj.state.val;
+    
+    // Wir übersetzen die ioBroker-Zahl in den Text, den die URL erwartet
+    let modeString = '';
+    switch (newModeNum) {
+        case 0: modeString = 'Off'; break;
+        case 1: modeString = 'Manual'; break;
+        case 2: modeString = 'Auto'; break; // Bei manchen Versionen heißt das intern 'PvAndMinSoc'
+        case 3: modeString = 'MaxPower'; break;
+        default: return;
+    }
+
+    console.log(`[TSC-Write] Trigger! Sende neuen Lademodus für K.I.T.T.: ${modeString}`);
+
+    // Die von dir gefundene URL zusammenbauen
+    const path = `/api/Home/UpdateCarChargeMode?carId=${carId}&chargeMode=${modeString}`;
+
+    // Die meisten dieser APIs verlangen POST für Aktionen
+    const options = {
+        hostname: host,
+        port: parseInt(port),
+        path: path,
+        method: 'POST', 
+        headers: {
+            'Content-Length': 0 // Wir senden keine Daten im Body, alles steht in der URL
+        }
+    };
+
+    const req = http.request(options, (res: any) => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+            console.log(`[TSC-Write] ERFOLG! API antwortete mit Status ${res.statusCode}`);
+            setState(dpChargeMode, newModeNum, true); // Wert in ioBroker grün/bestätigt schalten
+        } else {
+            console.error(`[TSC-Write] FEHLER! Status ${res.statusCode}.`);
+            // Setzt den ioBroker-Wert nach 2 Sekunden auf den echten Wert des TSC zurück
+            setTimeout(updateTscStatus, 2000); 
+        }
+    });
+
+    req.on('error', (e: any) => console.error(`[TSC-Write] Netzwerkfehler: ${e.message}`));
+    req.end();
+});
+
+// --- TEIL 3: ZEITPLAN (30 Sekunden) ---
+schedule('*/30 * * * * *', updateTscStatus);
+updateTscStatus();

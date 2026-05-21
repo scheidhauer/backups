@@ -103,6 +103,7 @@ onIOB({ id: [ einspeisungTotal, bezugTotal, erzeugungHeute ], change: 'ne'}, ada
 const MAX_POWER = 1200;
 const AC_MODE_ID = "control.acMode";
 const POWER_ID: string = "alias.0.PV.Einspeisung/Verbrauch";
+const USE_setDeviceAutomationInOutLimit: boolean = true;
 
 // wenn gewünschte Lade- oder Entlade-Leistung kleiner diesem Wert, dann wird nur ein Hyper benutzt
 const MIN_DISTRIBUTE_POWER = 1000;
@@ -147,22 +148,23 @@ class Hyper {
         // hmmmh, once again I have to update the sign?
         var curPower = - this.getPower();
 
-        this.logDebug(": setDeviceAutomationInOutLimit: " + val + ", " + curPower);
-
         if (this.noNeedToChangePower(val, curPower)) {
             this.logDebug(": noNeedToChangePower: new: " + val + ", old: " + curPower);
             return;
         }
 
-        //this.setValue("control.setDeviceAutomationInOutLimit", val);
+        if (USE_setDeviceAutomationInOutLimit) {
+            this.logDebug(": setDeviceAutomationInOutLimit: " + val + ", " + curPower);
+            this.setValue("control.setDeviceAutomationInOutLimit", val);
+        } else {
+            this.logDebug(": setValue: " + val + ", " + curPower);
+            if (val >= 0) {
+                this.setValue("control.setOutputLimit", val);
+            }
 
-
-        if (val >= 0) {
-            this.setValue("control.setOutputLimit", val);
-        }
-
-        if (val <= 0) {
-            this.setValue("control.setInputLimit", -val);
+            if (val <= 0) {
+                this.setValue("control.setInputLimit", -val);
+            }
         }
     }
 
@@ -512,7 +514,7 @@ function setChargeLimitAllHypers(val: number): void {
 // Alle Hypers ein mal die Woche auf 100% laden (wenn genug Sonne kommt :-)
 //schedule( {hour: 1, minute: 0, dayOfWeek: 6}, function() {
 
-const Sommer:boolean = false;
+const Sommer:boolean = true;
 
 if (Sommer) {
 

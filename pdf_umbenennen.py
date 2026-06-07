@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 from google import genai
 from pypdf import PdfReader
 # Mac-spezifische Bibliotheken für OCR
@@ -91,13 +92,21 @@ def generiere_dateiname(text_inhalt):
     return response.text.strip()
 
 def main():
+    # Sucht alle PDFs, die mit '202' beginnen
     such_muster = os.path.join(ORDNER_PFAD, "202*.pdf")
     pdf_dateien = glob.glob(such_muster)
     
-    print(f"Aktueller Ordner: {ORDNER_PFAD}")
-    print(f"{len(pdf_dateien)} passende PDFs gefunden (beginnend mit '202'). Starte Verarbeitung...")
+    # Regex für das Scan-Format: JJJJMMTT_HHMMSS.pdf (z.B. 20260424_083623.pdf)
+    scan_muster = re.compile(r"^\d{8}_\d{6}\.pdf$")
 
-    for pfad in pdf_dateien:
+    print(f"Aktueller Ordner: {ORDNER_PFAD}")
+    
+    # Filtere Dateien: Nur die, die exakt dem Scan-Muster entsprechen
+    zu_verarbeiten = [f for f in pdf_dateien if scan_muster.match(os.path.basename(f))]
+
+    print(f"{len(zu_verarbeiten)} rohe Scan-PDFs gefunden. Starte Verarbeitung...")
+
+    for pfad in zu_verarbeiten:
         try:
             print(f"\nVerarbeite: {os.path.basename(pfad)}...")
             text = extrahiere_text(pfad)

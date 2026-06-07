@@ -12,7 +12,14 @@ from Foundation import NSDictionary
 # Starten mit: python3 ../pdf_umbenennen.py
 #
 # 1. KONFIGURATION
-API_KEY = "cccc"
+# Versuche .env Datei zu laden (optional, falls python-dotenv installiert ist)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+API_KEY = os.getenv("GEMINI_API_KEY")
 
 # GEÄNDERT: Nutzt jetzt dynamisch den aktuellen Ordner
 ORDNER_PFAD = os.getcwd()
@@ -21,7 +28,7 @@ ORDNER_PFAD = os.getcwd()
 if not API_KEY:
     raise ValueError(
         "Fehler: Die Umgebungsvariable 'GEMINI_API_KEY' wurde nicht gefunden!\n"
-        "Bitte setze sie im Terminal mit: export GEMINI_API_KEY='dein_schlüssel'"
+        "Bitte erstelle eine '.env' Datei oder setze sie im Terminal mit: export GEMINI_API_KEY='dein_schlüssel'"
     )
 
 client = genai.Client(api_key=API_KEY)

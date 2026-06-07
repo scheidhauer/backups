@@ -2,18 +2,13 @@ import os
 import glob
 import re
 from google import genai
-from pypdf import PdfReader
-# Mac-spezifische Bibliotheken für OCR
-import Vision
-import Quartz
-from Cocoa import NSURL
-from Foundation import NSDictionary
 
-#
-# Starten mit: python3 ../pdf_umbenennen.py
-#
+# Mac-spezifische native Bibliotheken für PDF und OCR
+import Quartz
+import Vision
+from Cocoa import NSURL
+
 # 1. KONFIGURATION
-# Versuche .env Datei zu laden (optional, falls python-dotenv installiert ist)
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -21,11 +16,8 @@ except ImportError:
     pass
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-
-# GEÄNDERT: Nutzt jetzt dynamisch den aktuellen Ordner
 ORDNER_PFAD = os.getcwd()
 
-# Sicherheits-Check: Falls die Variable nicht gesetzt ist, bricht das Skript ab
 if not API_KEY:
     raise ValueError(
         "Fehler: Die Umgebungsvariable 'GEMINI_API_KEY' wurde nicht gefunden!\n"
@@ -34,11 +26,9 @@ if not API_KEY:
 
 client = genai.Client(api_key=API_KEY)
 
-def mac_ocr(image_path):
-    """Nutzt die native macOS Texterkennung (Live Text)"""
-    input_url = NSURL.fileURLWithPath_(image_path)
-    request_handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(input_url, None)
-    
+def mac_ocr_cgimage(cg_image):
+    """Nutzt die native macOS Texterkennung (Live Text) direkt mit einem CGImage im RAM"""
+    request_handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, None)
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     
@@ -54,21 +44,53 @@ def mac_ocr(image_path):
             text += candidates[0].string() + "\n"
     return text
 
+def pdf_page_to_cgimage(pdf_page, dpi=150):
+    """Rendert eine PDFPage im RAM in ein CGImage"""
+    media_box = pdf_page.boundsForBox_(0) # 0 = kPDFDisplayBoxMediaBox
+    width = int(media_box.size.width * (dpi / 72.0))
+    height = int(media_box.size.height * (dpi / 72.0))
+
+    color_space = Quartz.CGColorSpaceCreateDeviceRGB()
+    context = Quartz.CGBitmapContextCreate(
+        None, width, height, 8, 0, color_space, 
+        Quartz.kCGImageAlphaPremultipliedLast
+    )
+
+    if not context:
+        return None
+
+    # Weißer Hintergrund
+    Quartz.CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0)
+    Quartz.CGContextFillRect(context, Quartz.CGRectMake(0, 0, width, height))
+
+    # Skalierung für DPI
+    Quartz.CGContextScaleCTM(context, dpi / 72.0, dpi / 72.0)
+
+    # PDF-Seite in den Grafikkontext zeichnen
+    pdf_page.drawWithBox_toContext_(0, context)
+
+    # CGImage erstellen
+    cg_image = Quartz.CGBitmapContextCreateImage(context)
+    return cg_image
+
 def extrahiere_text(pdf_pfad):
-    """Versucht erst digitalen Text zu lesen, falls leer -> Mac OCR"""
-    reader = PdfReader(pdf_pfad)
-    text = ""
-    if reader.pages:
-        text = reader.pages[0].extract_text() or ""
+    """Versucht erst digitalen Text zu lesen (nativ über PDFKit), falls leer -> native OCR im RAM"""
+    url = NSURL.fileURLWithPath_(pdf_pfad)
+    pdf_doc = Quartz.PDFDocument.alloc().initWithURL_(url)
     
+    if not pdf_doc or pdf_doc.pageCount() == 0:
+        return ""
+        
+    page = pdf_doc.pageAtIndex_(0)
+    
+    # 1. Versuche, digitalen Text nativ zu extrahieren
+    text = page.string() or ""
+    
+    # 2. Falls kein digitaler Text vorhanden ist -> OCR auf der ersten Seite ausführen
     if not text.strip():
-        from pdf2image import convert_from_path
-        seiten = convert_from_path(pdf_pfad, first_page=1, last_page=1)
-        if seiten:
-            temp_img = "temp_page.png"
-            seiten[0].save(temp_img, "PNG")
-            text = mac_ocr(temp_img)
-            os.remove(temp_img)
+        cg_image = pdf_page_to_cgimage(page, dpi=150)
+        if cg_image:
+            text = mac_ocr_cgimage(cg_image)
             
     return text
 
@@ -91,9 +113,35 @@ def generiere_dateiname(text_inhalt):
     )
     return response.text.strip()
 
+def bereinige_und_sichere_dateiname(neuer_name):
+    """Extrahiert das Zielmuster aus der Gemini-Antwort und bereinigt illegale Zeichen"""
+    # Suche gezielt nach dem Muster YYYY-MM-DD_...pdf
+    match = re.search(r"\d{4}-\d{2}-\d{2}_[^\s/\\:*?\"<>|]+\.pdf", neuer_name, re.IGNORECASE)
+    if match:
+        name = match.group(0)
+    else:
+        # Fallback: Entferne Markdown-Reste und bereinige
+        name = neuer_name.strip("`'\" \n\r\t")
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        name = "".join(c for c in name if c.isalnum() or c in ".-_")
+    return name
+
+def finde_freien_dateinamen(ziel_ordner, gewuenschter_name):
+    """Prüft, ob der Dateiname bereits existiert, und hängt ggf. einen Zähler an (z.B. _1, _2)"""
+    basis, endung = os.path.splitext(gewuenschter_name)
+    neuer_name = gewuenschter_name
+    counter = 1
+    
+    while os.path.exists(os.path.join(ziel_ordner, neuer_name)):
+        neuer_name = f"{basis}_{counter}{endung}"
+        counter += 1
+        
+    return neuer_name
+
 def main():
-    # Sucht alle PDFs, die mit '202' beginnen
-    such_muster = os.path.join(ORDNER_PFAD, "202*.pdf")
+    # Sucht alle PDF-Dateien
+    such_muster = os.path.join(ORDNER_PFAD, "*.pdf")
     pdf_dateien = glob.glob(such_muster)
     
     # Regex für das Scan-Format: JJJJMMTT_HHMMSS.pdf (z.B. 20260424_083623.pdf)
@@ -115,13 +163,15 @@ def main():
                 print("Kein Text im Dokument gefunden (auch nicht per OCR). Überspringe.")
                 continue
                 
-            neuer_name = generiere_dateiname(text)
-            neuer_name = "".join(c for c in neuer_name if c.isalnum() or c in ".-_")
+            raw_neuer_name = generiere_dateiname(text)
+            neuer_name = bereinige_und_sichere_dateiname(raw_neuer_name)
             
-            neuer_pfad = os.path.join(ORDNER_PFAD, neuer_name)
+            # Schutz vor Überschreiben: freien Namen ermitteln
+            sicherer_name = finde_freien_dateinamen(ORDNER_PFAD, neuer_name)
+            neuer_pfad = os.path.join(ORDNER_PFAD, sicherer_name)
             
             os.rename(pfad, neuer_pfad)
-            print(f"Erfolgreich umbenannt in: {neuer_name}")
+            print(f"Erfolgreich umbenannt in: {sicherer_name}")
             
         except Exception as e:
             print(f"Fehler bei {os.path.basename(pfad)}: {e}")

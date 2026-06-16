@@ -273,9 +273,9 @@ class Hyper {
 
             var power = this.getPowerWhenNotControlled();
             var curPower = this.getPower();
-            if (Math.abs(power - curPower) > 5) {  // > 5 weil das Setzen mitunter nicht genau aufs Watt funktioniert
+            if (Math.abs(power + curPower) > 5) {  // Vorzeichen entgegengesetzt (daher +). > 5 weil Setzen nicht genau aufs Watt funktioniert
                 console.info("change power of " + this.getGUID() + " to: " + power + " (before: " + curPower + ")");
-                this.setAcValue(-power);
+                this.setAcValue(power);
             }
             return false;
         }

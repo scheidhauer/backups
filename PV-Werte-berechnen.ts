@@ -271,12 +271,11 @@ class Hyper {
                 this.warnWhenControllOff = false;
             }
 
-            // hmpf: -1 weil getPower() und setAcValue() sind sich wohl nicht einig, was das Vorzeichen angeht
-            var power = -1 * this.getPowerWhenNotControlled();
+            var power = this.getPowerWhenNotControlled();
             var curPower = this.getPower();
             if (Math.abs(power - curPower) > 5) {  // > 5 weil das Setzen mitunter nicht genau aufs Watt funktioniert
                 console.info("change power of " + this.getGUID() + " to: " + power + " (before: " + curPower + ")");
-                this.setAcValue(power);
+                this.setAcValue(-power);
             }
             return false;
         }

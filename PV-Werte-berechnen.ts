@@ -38,6 +38,11 @@ function scheduleIOB(pattern: string, callback: () => void) {
     schedule(pattern, callback);
 }
 
+function existsStateIOB(id: string): boolean {
+    // @ts-ignore
+    return existsState(id);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -133,6 +138,7 @@ class Hyper {
     private timeOfLastModeSwitch: Date = new Date(0);
     private warnWhenControllOff: boolean = true;
     private firstTimeWhenOutputWasZero: Date|null = null;
+    private alertSent: boolean = false;
 
 
     static getAllHypers(): Hyper[] {
@@ -392,6 +398,52 @@ class Hyper {
         var now = new Date().getTime();
         return Math.round((now - this.timeOfLastModeSwitch.getTime()) / 1000);
     }
+
+    getLastUpdate(): number {
+        const val = this.getValue("lastUpdate");
+        if (val === null || val === undefined) {
+            return 0;
+        }
+        const time = new Date(val).getTime();
+        return isNaN(time) ? 0 : time;
+    }
+
+    checkFailure(maxAgeMs: number, whatsAppId: string): void {
+        const lastUpdateTime = this.getLastUpdate();
+        if (lastUpdateTime === 0) {
+            log(`Zendure-Überwachung: Letztes Update für ${this.getName()} konnte nicht gelesen werden.`, 'warn');
+            return;
+        }
+
+        const diffMs = Date.now() - lastUpdateTime;
+
+        if (diffMs > maxAgeMs) {
+            if (!this.alertSent) {
+                const minutesAgo = Math.round(diffMs / 1000 / 60);
+                const message = `⚠️ *Zendure Alarm*: Der Akku *${this.getName()}* hängt vermutlich! Das letzte Update liegt bereits ${minutesAgo} Minuten zurück.`;
+                
+                if (existsStateIOB(whatsAppId)) {
+                    setStateIOB(whatsAppId, message);
+                } else {
+                    log(`WhatsApp Datenpunkt ${whatsAppId} nicht gefunden!`, 'warn');
+                }
+
+                log(message, 'warn');
+                this.alertSent = true;
+            }
+        } else {
+            if (this.alertSent) {
+                const recoveryMessage = `✅ *Zendure Entwarnung*: Der Akku *${this.getName()}* sendet wieder aktuelle Daten.`;
+                
+                if (existsStateIOB(whatsAppId)) {
+                    setStateIOB(whatsAppId, recoveryMessage);
+                }
+                
+                log(recoveryMessage, 'info');
+                this.alertSent = false;
+            }
+        }
+    }
 }
 
 function getCurrentZendurePower(includeNotControlledHypers: boolean): number {
@@ -648,3 +700,29 @@ on({id: dpChargeMode, change: 'any', ack: false}, (obj) => {
 // --- TEIL 3: ZEITPLAN (30 Sekunden) ---
 schedule('*/30 * * * * *', updateTscStatus);
 updateTscStatus();
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Der Akku hängt sich manchmal auf: ich will eine WhatApp bekommen, wenn das der Fall ist, damit ich was unternehmen kann.
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const ID_WHATSAPP    = 'whatsapp-cmb.1.sendMessage'; // Evtl. whatsapp-cmb.1.<Instanz>.sendMessage anpassen
+const MAX_AGE_MS     = 60 * 60 * 1000; // 1 Stunde in Millisekunden
+
+// Zeitplan: Läuft alle 15 Minuten (*/15 * * * *)
+scheduleIOB("*/15 * * * *", () => {
+    for (const hyper of Hyper.getAllHypers()) {
+        hyper.checkFailure(MAX_AGE_MS, ID_WHATSAPP);
+    }
+});
+
+/*
+ // TEMPORÄRER SCHNELLTEST (nach Erfolg wieder löschen):                                                                                                  
+    setTimeout(() => {                                                                                                                                       
+        log("=== Starte Zendure-Überwachung Test ===");                                                                                                      
+        for (const hyper of Hyper.getAllHypers()) {                                                                                                          
+            // Wir testen mit 1 Millisekunde Alter, damit der Alarm sofort auslöst                                                                           
+            hyper.checkFailure(1, ID_WHATSAPP);                                                                                                              
+        }                                                                                                                                                    
+    }, 2000); // Startet 2 Sekunden nach Skriptstart  
+    */                                                                                                       
+

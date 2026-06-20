@@ -108,7 +108,7 @@ onIOB({ id: [ einspeisungTotal, bezugTotal, erzeugungHeute ], change: 'ne'}, ada
 const MAX_POWER = 1200;
 const AC_MODE_ID = "control.acMode";
 const POWER_ID: string = "alias.0.PV.Einspeisung/Verbrauch";
-const USE_setDeviceAutomationInOutLimit: boolean = true;
+const USE_setDeviceAutomationInOutLimit: boolean = false;
 
 // wenn gewünschte Lade- oder Entlade-Leistung kleiner diesem Wert, dann wird nur ein Hyper benutzt
 const MIN_DISTRIBUTE_POWER = 1000;

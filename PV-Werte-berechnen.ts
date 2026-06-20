@@ -108,7 +108,6 @@ onIOB({ id: [ einspeisungTotal, bezugTotal, erzeugungHeute ], change: 'ne'}, ada
 const MAX_POWER = 1200;
 const AC_MODE_ID = "control.acMode";
 const POWER_ID: string = "alias.0.PV.Einspeisung/Verbrauch";
-const USE_setDeviceAutomationInOutLimit: boolean = true;
 
 // wenn gewünschte Lade- oder Entlade-Leistung kleiner diesem Wert, dann wird nur ein Hyper benutzt
 const MIN_DISTRIBUTE_POWER = 1000;
@@ -149,34 +148,49 @@ class Hyper {
         this.id = id;
     }
  
+    // Neue Klassen-Eigenschaften für das Tracking
+    private lastSentValue: number = 0;
+    private lastSentTime: number = 0;
+    private readonly MIN_UPDATE_INTERVAL_MS = 30000; // 30 Sekunden
+    private readonly MIN_CHANGE_WATTS = 30; // 30W Hysterese
+
     private setDeviceAutomationInOutLimit(val: number): void {
 
         // Bedeutung von val sollte sein
         //    negativer Wert --> Akku wird GEladen
         //    positiver Wert --> Akku wird ENTladen
 
-        var curPower = this.getPower();
+        const curPower = this.getPower();
 
         if (this.noNeedToChangePower(val, curPower)) {
             this.logDebug(": noNeedToChangePower: new: " + val + ", old: " + curPower);
             return;
         }
 
-        if (USE_setDeviceAutomationInOutLimit) {
-            this.logDebug(": setDeviceAutomationInOutLimit: " + val + ", " + curPower);
-            this.setValue("control.setDeviceAutomationInOutLimit", val);
-        } else {
-            this.logDebug(": setValue: " + val + ", " + curPower);
-            if (val >= 0) {
-                this.setValue("control.setOutputLimit", val);
-            }
+        const now = Date.now();
+        const timeSinceLastUpdate = now - this.lastSentTime;
+        const powerDifference = Math.abs(val - this.lastSentValue);
 
-            if (val <= 0) {
-                this.setValue("control.setInputLimit", -val);
-            }
+        // Drosselung: Ignoriere kleine Änderungen oder zu schnelle Updates, 
+        // ES SEI DENN, es ist eine massive Änderung (z.B. > 500W wg. Herd/Backofen)
+        if (timeSinceLastUpdate < this.MIN_UPDATE_INTERVAL_MS && powerDifference < 500) {
+            // this.logDebug("Update verworfen (Rate-Limit). Differenz: " + powerDifference + "W");
+            return;
         }
-    }
 
+        if (powerDifference < this.MIN_CHANGE_WATTS) {
+            // this.logDebug("Update verworfen (Hysterese). Differenz zu klein.");
+            return;
+        }
+
+        // Wenn wir hier ankommen, dürfen wir senden
+        this.logDebug(": setDeviceAutomationInOutLimit: " + val + " (alt: " + this.lastSentValue + ")");
+        this.setValue("control.setDeviceAutomationInOutLimit", val);
+        
+        // Status aktualisieren
+        this.lastSentValue = val;
+        this.lastSentTime = now;
+    }
     private noNeedToChangePower(newPower: number, curPower: number): boolean {
 
         if (curPower == newPower) {

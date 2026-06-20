@@ -151,8 +151,11 @@ class Hyper {
  
     private setDeviceAutomationInOutLimit(val: number): void {
 
-        // hmmmh, once again I have to update the sign?
-        var curPower = - this.getPower();
+        // Bedeutung von val sollte sein
+        //    negativer Wert --> Akku wird GEladen
+        //    positiver Wert --> Akku wird ENTladen
+
+        var curPower = this.getPower();
 
         if (this.noNeedToChangePower(val, curPower)) {
             this.logDebug(": noNeedToChangePower: new: " + val + ", old: " + curPower);
@@ -205,7 +208,7 @@ class Hyper {
     }
 
     getPower(): number {
-        return this.getValue("gridInputPower") - this.getOutputHomePower();
+        return this.getOutputHomePower() - this.getValue("gridInputPower");
     }
 
     getOutputHomePower(): number {
@@ -279,7 +282,7 @@ class Hyper {
 
             var power = this.getPowerWhenNotControlled();
             var curPower = this.getPower();
-            if (Math.abs(power + curPower) > 5) {  // Vorzeichen entgegengesetzt (daher +). > 5 weil Setzen nicht genau aufs Watt funktioniert
+            if (Math.abs(power - curPower) > 5) {  // > 5 weil das Setzen mitunter nicht genau aufs Watt funktioniert
                 console.info("change power of " + this.getName() + " to: " + power + " (before: " + curPower + ")");
                 this.setAcValue(power);
             }
@@ -476,7 +479,7 @@ function adaptEigenverbrauch()  {
     var power: number = getValue(currentPower);
     var akkuPower: number = getCurrentZendurePower(true);
 
-    var verbrauch: number = (erz + power - akkuPower);
+    var verbrauch: number = (erz + power + akkuPower);
     //log("Verbrauch: " + verbrauch);
     setStateIOB(eigenverbrauch, verbrauch);
 }
@@ -495,7 +498,7 @@ function adaptZendure()  {
 
     var curControlledPower = getCurrentZendurePower(false);
     var curLeistung = getValue(POWER_ID);
-    var desiredPower = curLeistung - curControlledPower;
+    var desiredPower = curLeistung + curControlledPower;
 
     if (desiredPower != 0) {
         // Wenn wir Strom aus dem Netz ziehen: lieber den Akku anweisen etwas mehr abzugeben, 

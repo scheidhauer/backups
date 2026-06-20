@@ -717,14 +717,31 @@ scheduleIOB("*/15 * * * *", () => {
     }
 });
 
-/*
- // TEMPORÄRER SCHNELLTEST (nach Erfolg wieder löschen):                                                                                                  
-    setTimeout(() => {                                                                                                                                       
-        log("=== Starte Zendure-Überwachung Test ===");                                                                                                      
-        for (const hyper of Hyper.getAllHypers()) {                                                                                                          
-            // Wir testen mit 1 Millisekunde Alter, damit der Alarm sofort auslöst                                                                           
-            hyper.checkFailure(1, ID_WHATSAPP);                                                                                                              
-        }                                                                                                                                                    
-    }, 2000); // Startet 2 Sekunden nach Skriptstart  
-    */                                                                                                       
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Luftentfeuchter: WhatsApp-Benachrichtigung bei vollem Wassertank
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+const DEHUMIDIFIERS = [
+    'midea.0.153931628343857',
+    'midea.0.31885837417521'
+];
+
+const WHATSAPP_RECIPIENTS = [
+    'whatsapp-cmb.1.sendMessage', // Ralf
+    'whatsapp-cmb.0.sendMessage'  // Marion
+];
+
+for (const devId of DEHUMIDIFIERS) {
+    // @ts-ignore
+    on({id: devId + ".status.tankFull", change: 'ne', val: true}, () => {
+        const name = getValue(devId + ".info.name") || "Luftentfeuchter";
+        const message = `⚠️ *Luftentfeuchter*: Der Tank von *${name}* ist voll und muss geleert werden!`;
+        
+        for (const waId of WHATSAPP_RECIPIENTS) {
+            if (existsStateIOB(waId)) {
+                setStateIOB(waId, message);
+            }
+        }
+        log(message, 'info');
+    });
+}

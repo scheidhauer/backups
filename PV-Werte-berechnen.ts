@@ -108,7 +108,7 @@ onIOB({ id: [ einspeisungTotal, bezugTotal, erzeugungHeute ], change: 'ne'}, ada
 const MAX_POWER = 1200;
 const AC_MODE_ID = "control.acMode";
 const POWER_ID: string = "alias.0.PV.Einspeisung/Verbrauch";
-const USE_setDeviceAutomationInOutLimit: boolean = false;
+const USE_setDeviceAutomationInOutLimit: boolean = true;
 
 // wenn gewünschte Lade- oder Entlade-Leistung kleiner diesem Wert, dann wird nur ein Hyper benutzt
 const MIN_DISTRIBUTE_POWER = 1000;
@@ -241,7 +241,7 @@ class Hyper {
     }
 
     getPowerWhenNotControlled(): number {
-        return getValue("0_userdata.0.PV.AkkuPower-" + this.getGUID());
+        return parseInt(getValue("0_userdata.0.PV.AkkuPower-" + this.getGUID()));
     }
 
     isControlled(): boolean {
@@ -280,7 +280,7 @@ class Hyper {
             var power = this.getPowerWhenNotControlled();
             var curPower = this.getPower();
             if (Math.abs(power + curPower) > 5) {  // Vorzeichen entgegengesetzt (daher +). > 5 weil Setzen nicht genau aufs Watt funktioniert
-                console.info("change power of " + this.getGUID() + " to: " + power + " (before: " + curPower + ")");
+                console.info("change power of " + this.getName() + " to: " + power + " (before: " + curPower + ")");
                 this.setAcValue(power);
             }
             return false;
@@ -506,7 +506,9 @@ function adaptZendure()  {
 
     var availableHypers: Hyper[] = [];
     for (var hyper of Hyper.getAllHypers()) {
-        if (hyper.checkBelowDischargeLimit(desiredPower) && hyper.isAvailable(desiredPower)) {
+        // TODO: Aufruf von isAvailable() muss auf alle Fälle erfolgen, sonst wird das setAcValue() da drin nicht aufgerufen
+        let available = hyper.isAvailable(desiredPower);
+        if (hyper.checkBelowDischargeLimit(desiredPower) && available) {
             availableHypers.push(hyper);
         }
     }

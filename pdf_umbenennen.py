@@ -149,15 +149,17 @@ def main():
     such_muster = os.path.join(ORDNER_PFAD, "*.pdf")
     pdf_dateien = glob.glob(such_muster)
     
-    # Regex für das Scan-Format: epsonJJJJMMTT_HHMMSS.pdf
-    scan_muster = re.compile(r"^epson\d{8}_\d{6}\.pdf$")
+    # Regex für beide Scan-Formate:
+    # 1. epsonJJJJMMTT_HHMMSS.pdf
+    # 2. JJJJ-MM-TT-HH-MM-SS.pdf
+    scan_muster = re.compile(r"^(epson\d{8}_\d{6}|\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.pdf$")
 
     print(f"Scanne Ordner nach PDFs: {ORDNER_PFAD}")
     
     # Filtere Dateien
     zu_verarbeiten = [f for f in pdf_dateien if scan_muster.match(os.path.basename(f))]
 
-    print(f"{len(zu_verarbeiten)} passende Epson-PDFs gefunden.")
+    print(f"{len(zu_verarbeiten)} passende Unverarbeitete PDFs gefunden.")
 
     for pfad in zu_verarbeiten:
         try:

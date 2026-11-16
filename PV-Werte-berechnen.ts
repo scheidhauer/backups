@@ -685,7 +685,7 @@ function restartAdapter() {
 const http = require('http');
 
 const tscIp: string = 'ds725:7190'; 
-const carId: number = 1;
+const carId: number = 2;
 const dpChargeMode: string = '0_userdata.0.TSC.AktuellerLademodus';
 
 // 1. Datenpunkt anlegen

@@ -107,7 +107,6 @@ onIOB({ id: [ einspeisungTotal, bezugTotal, erzeugungHeute ], change: 'ne'}, ada
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 const MAX_POWER = 1200;
-const AC_MODE_ID = "control.acMode";
 const POWER_ID: string = "alias.0.PV.Einspeisung/Verbrauch";
 
 // wenn gewünschte Lade- oder Entlade-Leistung kleiner diesem Wert, dann wird nur ein Hyper benutzt
@@ -120,11 +119,10 @@ const SECS_BETWEEN_MODE_SWITCH = 3*60; // mindestens 3 min zwischen mode switche
 // when the change between old and new power ist below this value, we will ignore it in oder not to send too many commands to the akku
 const MIN_POWER_CHANGE = 30;
 
-enum AcMode {
-    AC_MODE_AUS = 0,
-    AC_MODE_LADEN = 1,
-    AC_MODE_EINSPEISEN = 2
-}
+// Ansteuerung über setDeviceAutomationInOutLimit (Adapter >= 5.2.1).
+// acMode, autoModel und hemsState werden ausschließlich vom Adapter verwaltet.
+const MAX_TELEMETRY_AGE_MS = 10 * 60 * 1000;
+const MAX_METER_AGE_MS = 2 * 60 * 1000;
 
 class Hyper {
 
@@ -135,7 +133,11 @@ class Hyper {
 
 
     private readonly id: string;   
-    private timeOfLastModeSwitch: Date = new Date(0);
+    private lastDirection = 0;
+    private lastDirectionChangeMs = 0;
+    private directionInitialized = false;
+    private paused = false;
+    private diagnosticReason = "";
     private warnWhenControllOff: boolean = true;
     private firstTimeWhenOutputWasZero: Date|null = null;
     private alertSent: boolean = false;
@@ -149,67 +151,140 @@ class Hyper {
         this.id = id;
     }
  
-    // Neue Klassen-Eigenschaften für das Tracking
-    private lastSentValue: number = 0;
-    private lastSentTime: number = 0;
-    private readonly MIN_UPDATE_INTERVAL_MS = 30000; // 30 Sekunden
-    private readonly MIN_CHANGE_WATTS = 30; // 30W Hysterese
+    private lastSentValue: number | null = null;
+    private lastSentTime = 0;
+    private retryCount = 0;
+    private mismatchSince = 0;
+    private readonly MIN_UPDATE_INTERVAL_MS = 30000;
 
-    private setDeviceAutomationInOutLimit(val: number): void {
+    private optionalValue(key: string): any {
+        const id = this.id + "." + key;
+        return existsStateIOB(id) ? getStateIOB(id)?.val : undefined;
+    }
 
-        // Bedeutung von val sollte sein
-        //    negativer Wert --> Akku wird GEladen
-        //    positiver Wert --> Akku wird ENTladen
+    isCalibrating(): boolean {
+        const status = this.optionalValue("socStatus");
+        return status !== null && status !== undefined && Number(status) === 1;
+    }
 
-        const curPower = this.getPower();
+    telemetryIsFresh(): boolean {
+        const age = Date.now() - this.getLastUpdate();
+        return this.getLastUpdate() > 0 && age >= 0 && age <= MAX_TELEMETRY_AGE_MS &&
+            ["outputHomePower", "gridInputPower", "electricLevel", "minSoc", "socSet", "packNum"]
+                .every(key => {
+                    const value = this.optionalValue(key);
+                    return typeof value === "number" && Number.isFinite(value);
+                }) && this.getValue("packNum") > 0;
+    }
 
-        if (this.noNeedToChangePower(val, curPower)) {
-            this.logDebug(": noNeedToChangePower: new: " + val + ", old: " + curPower);
+    diagnose(reason: string, target?: number): void {
+        if (this.diagnosticReason === reason) return;
+        this.diagnosticReason = reason;
+        const keys = ["outputHomePower", "gridInputPower", "electricLevel", "lastUpdate",
+            "socStatus", "minSoc", "socSet", "hemsState", "autoModel", "acMode",
+            "inverseMaxPower", "control.lowVoltageBlock", "control.fullChargeNeeded"];
+        const values: any = { target, lastSent: this.lastSentValue };
+        for (const key of keys) values[key] = this.optionalValue(key) ?? "nicht vorhanden";
+        console.warn(this.getName() + ": " + reason + " " + JSON.stringify(values));
+    }
+
+    pause(reason: string): void {
+        this.diagnose(reason);
+        if (this.paused) return;
+        this.paused = true;
+        // Kalibrierung nicht durch einen Stoppauftrag unterbrechen.
+        if (!this.isCalibrating()) this.writePower(0);
+        // Nach Ende der Pause den aktuellen Bedarf erneut übergeben.
+        this.lastSentValue = null;
+    }
+
+    resume(): void {
+        if (this.paused) {
+            console.info(this.getName() + ": Regelung wieder freigegeben");
+            this.directionInitialized = false;
+            this.diagnosticReason = "";
+        }
+        this.paused = false;
+    }
+
+    private writePower(value: number): void {
+        // Explizit ack=false: Steuerauftrag, keine Messwertbestätigung.
+        setStateIOB(this.id + ".control.setDeviceAutomationInOutLimit", value, false);
+        const direction = Math.sign(value);
+        if (direction !== 0 && direction !== this.lastDirection) {
+            this.lastDirection = direction;
+            this.lastDirectionChangeMs = Date.now();
+        }
+        this.lastSentValue = value;
+        this.lastSentTime = Date.now();
+        this.mismatchSince = 0;
+        this.logDebug(": Leistungsauftrag " + value + " W");
+    }
+
+    private setDeviceAutomationInOutLimit(value: number): void {
+        if (!Number.isFinite(value)) {
+            this.diagnose("Ungültige Sollleistung", value);
             return;
         }
-
+        if (this.isCalibrating()) {
+            this.pause("SOC-Kalibrierung aktiv");
+            return;
+        }
+        if (!this.telemetryIsFresh()) {
+            this.pause("Messwerte fehlen oder sind veraltet");
+            return;
+        }
         const now = Date.now();
-        const timeSinceLastUpdate = now - this.lastSentTime;
-        const powerDifference = Math.abs(val - this.lastSentValue);
-
-        // Drosselung: Ignoriere kleine Änderungen oder zu schnelle Updates, 
-        // ES SEI DENN, es ist eine massive Änderung (z.B. > 500W wg. Herd/Backofen)
-        if (timeSinceLastUpdate < this.MIN_UPDATE_INTERVAL_MS && powerDifference < 500) {
-            // this.logDebug("Update verworfen (Rate-Limit). Differenz: " + powerDifference + "W");
+        let target = Math.round(Math.max(-MAX_POWER, Math.min(MAX_POWER, value)));
+        if (!this.directionInitialized) {
+            const actual = this.getPower();
+            if (Math.abs(actual) >= 30) {
+                this.lastDirection = Math.sign(actual);
+                this.lastDirectionChangeMs = now;
+            }
+            this.directionInitialized = true;
+        }
+        if (target !== 0 && this.lastDirection !== 0 && Math.sign(target) !== this.lastDirection &&
+            now - this.lastDirectionChangeMs < SECS_BETWEEN_MODE_SWITCH * 1000) {
+            target = 0;
+        }
+        // Nullbefehle und der erste Auftrag dürfen nicht an der Hysterese scheitern.
+        if (this.lastSentValue === null || (target === 0 && this.lastSentValue !== 0)) {
+            this.retryCount = 0;
+            this.writePower(target);
             return;
         }
-
-        if (powerDifference < this.MIN_CHANGE_WATTS) {
-            // this.logDebug("Update verworfen (Hysterese). Differenz zu klein.");
+        const difference = Math.abs(target - this.lastSentValue);
+        const elapsed = now - this.lastSentTime;
+        if (difference >= MIN_POWER_CHANGE) {
+            if (elapsed < this.MIN_UPDATE_INTERVAL_MS && difference < 500) return;
+            this.retryCount = 0;
+            this.writePower(target);
             return;
         }
-
-        // Wenn wir hier ankommen, dürfen wir senden
-        this.logDebug(": setDeviceAutomationInOutLimit: " + val + " (alt: " + this.lastSentValue + ")");
-        this.setValue("control.setDeviceAutomationInOutLimit", val);
-        
-        // Status aktualisieren
-        this.lastSentValue = val;
-        this.lastSentTime = now;
-    }
-    private noNeedToChangePower(newPower: number, curPower: number): boolean {
-
-        if (curPower == newPower) {
-            return true;
+        // Unterhalb der Hysterese bleibt der letzte Auftrag maßgeblich.
+        const actual = this.getPower();
+        if (Math.abs(actual - this.lastSentValue) < 100) {
+            this.mismatchSince = 0;
+            this.diagnosticReason = "";
+            return;
         }
-
-        if (newPower == 0 || Math.sign(curPower) != Math.sign(newPower)) {
-            return false;
-        }
-
-        if (Math.abs(Math.abs(curPower) - Math.abs(newPower)) < MIN_POWER_CHANGE) {
-            return true;
-        } 
-
-        return false;
+        if (!this.mismatchSince) this.mismatchSince = now;
+        if (elapsed < 60000 || now - this.mismatchSince < 60000) return;
+        this.diagnose("Soll-/Ist-Abweichung seit mindestens 60 Sekunden", this.lastSentValue);
+        // Keine blinden Lade-/Stoppwiederholungen: Eine Kalibrierung kann bei
+        // Hyper-Firmware ohne socStatus nicht zuverlässig erkannt werden.
+        const status = this.optionalValue("socStatus");
+        const blocked = this.optionalValue("control.lowVoltageBlock") == true ||
+            this.optionalValue("control.fullChargeNeeded") == true;
+        const maxOutput = this.optionalValue("inverseMaxPower");
+        if (this.lastSentValue <= 0 || actual < -100 || status == null || Number(status) !== 0 ||
+            blocked || this.getSOC() <= this.getDischargeLimit() ||
+            typeof maxOutput !== "number" || this.lastSentValue > maxOutput || this.retryCount >= 2) return;
+        this.retryCount++;
+        this.writePower(this.lastSentValue);
     }
 
-    
     setChargeLimit(val): void {
         this.setValue("control.chargeLimit", val);
     }
@@ -279,7 +354,7 @@ class Hyper {
     }
 
     checkBelowDischargeLimit(desiredPower: number): boolean {
-        if (desiredPower > 0 && this.isBelowDischargeLimit()) {
+        if (this.isControlled() && desiredPower > 0 && this.isBelowDischargeLimit()) {
             this.logDebug(" is below discharge limit (" + this.getSOC() + "% < " + this.getDischargeLimit() + "%), charging now");
             this.setAcValue(-500);
             return false;
@@ -295,12 +370,7 @@ class Hyper {
                 this.warnWhenControllOff = false;
             }
 
-            var power = this.getPowerWhenNotControlled();
-            var curPower = this.getPower();
-            if (Math.abs(power - curPower) > 5) {  // > 5 weil das Setzen mitunter nicht genau aufs Watt funktioniert
-                console.info("change power of " + this.getName() + " to: " + power + " (before: " + curPower + ")");
-                this.setAcValue(power);
-            }
+            this.setAcValue(this.getPowerWhenNotControlled());
             return false;
         }
 
@@ -355,13 +425,6 @@ class Hyper {
             this.firstTimeWhenOutputWasZero = null;
        }
         
-        // Umschaltung zwischen Laden und Entladen stresst wohl die Hardware, daher machen wir das nicht zu oft
-        if (! this.checkModeSwitch(desiredPower)) {
-            this.logDebug(": Kein mode switch, warte noch " + (SECS_BETWEEN_MODE_SWITCH - this.getSecsSinceLastModeChange()) + " Sekunden.");
-            this.setDeviceAutomationInOutLimit(0);
-            return false;
-        }
-
         return true;
     }
 
@@ -383,42 +446,10 @@ class Hyper {
             this.setDeviceAutomationInOutLimit(power);
         }
 
-        this.setAcMode(power);        
-    }
-
-    private toAcMode(power: number): AcMode  {
-        return (power >= 0) ? AcMode.AC_MODE_EINSPEISEN : AcMode.AC_MODE_LADEN;
-    }
-
-    private getAcMode(): number  {
-        return this.getValue(AC_MODE_ID);
-    }
-
-    private setAcMode(power: number): void  {
-        var newMode = this.toAcMode(power);
-        var oldMode = this.getAcMode();
-        if (oldMode == newMode || power == 0 ) {
-            return;
-        }
-
-        this.timeOfLastModeSwitch = new Date();
-        this.logDebug(": mode switch: " + oldMode + " --> " + newMode);
-        this.setValue(AC_MODE_ID, newMode);
-    }
-
-    private checkModeSwitch(power: number): boolean {
-        var newAcMode = this.toAcMode(power);
-        return (newAcMode == this.getAcMode()) ||
-               (this.getSecsSinceLastModeChange() > SECS_BETWEEN_MODE_SWITCH);
-    }
-
-    private getSecsSinceLastModeChange(): number {
-        var now = new Date().getTime();
-        return Math.round((now - this.timeOfLastModeSwitch.getTime()) / 1000);
     }
 
     getLastUpdate(): number {
-        const val = this.getValue("lastUpdate");
+        const val = this.optionalValue("lastUpdate");
         if (val === null || val === undefined) {
             return 0;
         }
@@ -505,6 +536,19 @@ adaptEigenverbrauch();
 var lastChoosenHyper: Hyper | null = null;
 
 function adaptZendure()  {
+    const hypers = Hyper.getAllHypers();
+    const meter = getStateIOB(POWER_ID);
+    const meterAge = meter ? Date.now() - meter.ts : Infinity;
+    const calibration = hypers.some(hyper => hyper.isCalibrating());
+    const fresh = hypers.every(hyper => hyper.telemetryIsFresh());
+    if (calibration || !fresh || typeof meter?.val !== "number" || !Number.isFinite(meter.val) ||
+        !Number.isFinite(meterAge) || meterAge < 0 || meterAge > MAX_METER_AGE_MS) {
+        const reason = calibration ? "Regelung pausiert: SOC-Kalibrierung eines Hyper" :
+            "Regelung pausiert: Messwerte fehlen oder sind veraltet";
+        for (const hyper of hypers) hyper.pause(reason);
+        return;
+    }
+    for (const hyper of hypers) hyper.resume();
     var curTotalPower = getCurrentZendurePower(true);
     var totalSOC = getBatteryTotalSOC();
 
@@ -560,6 +604,7 @@ function getHyperWithHighestOrLowestCapacity(availableHypers: Hyper[], desiredPo
 
     // wir wollen nicht zu oft zwischen den Hypern hin- und herschalten
     if (lastChoosenHyper != null && 
+        availableHypers.includes(lastChoosenHyper) &&
         hyperWithHighestCapacity !== lastChoosenHyper && 
         Math.abs(hyperWithHighestCapacity.getCurrentCapacity() - lastChoosenHyper.getCurrentCapacity()) < PREFER_HYPER_MAX_DIFFERENCE) {
 
@@ -572,7 +617,8 @@ function getHyperWithHighestOrLowestCapacity(availableHypers: Hyper[], desiredPo
 }
 
 onIOB({ id: POWER_ID, change: 'ne'}, adaptZendure);
-//adaptZendure();
+// Verworfene Anforderungen und abgelaufene Richtungssperren erneut berechnen.
+scheduleIOB('*/10 * * * * *', adaptZendure);
 
 
 function setChargeLimitAllHypers(val: number): void {
@@ -726,10 +772,10 @@ updateTscStatus();
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 const ID_WHATSAPP    = 'whatsapp-cmb.1.sendMessage'; // Evtl. whatsapp-cmb.1.<Instanz>.sendMessage anpassen
-const MAX_AGE_MS     = 2 * 60 * 60 * 1000; // 2 Stunden in Millisekunden
+const MAX_AGE_MS     = MAX_TELEMETRY_AGE_MS; // 10 Minuten
 
-// Zeitplan: Läuft alle 15 Minuten (*/15 * * * *)
-scheduleIOB("*/15 * * * *", () => {
+// Kommunikationsausfälle jede Minute prüfen.
+scheduleIOB("* * * * *", () => {
     for (const hyper of Hyper.getAllHypers()) {
         hyper.checkFailure(MAX_AGE_MS, ID_WHATSAPP);
     }

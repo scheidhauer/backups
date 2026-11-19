@@ -772,12 +772,12 @@ updateTscStatus();
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 const ID_WHATSAPP    = 'whatsapp-cmb.1.sendMessage'; // Evtl. whatsapp-cmb.1.<Instanz>.sendMessage anpassen
-const MAX_AGE_MS     = MAX_TELEMETRY_AGE_MS; // 10 Minuten
+const WHATSAPP_ALARM_AGE_MS = 2 * 60 * 60 * 1000; // 2 Stunden ohne Hyper-Update
 
 // Kommunikationsausfälle jede Minute prüfen.
 scheduleIOB("* * * * *", () => {
     for (const hyper of Hyper.getAllHypers()) {
-        hyper.checkFailure(MAX_AGE_MS, ID_WHATSAPP);
+        hyper.checkFailure(WHATSAPP_ALARM_AGE_MS, ID_WHATSAPP);
     }
 });
 
